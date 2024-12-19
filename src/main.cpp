@@ -18,9 +18,9 @@ WebServer server(80);
 Preferences preferences;
 
 // Constants and Definitions
-#define RDM6300_RX_PIN 4
+#define RDM6300_RX_PIN 5
 #define MOSFET 15
-#define RGB_STRIP_PIN 5
+#define RGB_STRIP_PIN 4
 #define NUM_LEDS 3
 
 #define CACHE_FILE "/cache.json"
