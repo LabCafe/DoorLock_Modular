@@ -11,27 +11,17 @@
 #include <Preferences.h>
 #include <FS.h>
 #include <SPIFFS.h>
-#include <unordered_map>
 #include <ctime>
 
 WebServer server(80);
 Preferences preferences;
 
 // Constants and Definitions
-#define RDM6300_RX_PIN 5
+#define RDM6300_RX_PIN 4
 #define MOSFET 15
-#define RGB_STRIP_PIN 4
+#define RGB_STRIP_PIN 5
 #define NUM_LEDS 3
 
-#define CACHE_FILE "/cache.json"
-struct CacheEntry {
-  bool hasAccess;
-  time_t lastUsed;
-};
-
-const char* API_KEY = "REPLACE_WITH_YOUR_API_KEY"; // Replace with your personal API key
-const char* BEARER_HEADER = "Bearer ";
-std::unordered_map<String, CacheEntry> cardCache;
 const time_t SEVEN_DAYS = 7 * 24 * 60 * 60;
 
 // Global Variables
@@ -46,8 +36,7 @@ void setupWiFi();
 void setupLEDs();
 void setupRDM6300();
 void RGBAnimation();
-String getMemberID(String cardID);
-bool checkMemberAccess(String memberID);
+bool checkAccess(String cardID);
 void openDoorLock();
 void CheckCard();
 void Leds_Blue();
@@ -55,10 +44,12 @@ void Leds_Green();
 void Leds_Red();
 void Leds_Yellow();
 void pingGoogle();
-void loadCacheFromFile();
-void saveCacheToFile();
-void cleanCache();
 void initializeSPIFFS();
+void saveCardID(String cardID);
+bool isCardIDStored(String cardID, time_t &timestamp);
+void updateCardTimestamp(String cardID);
+void deleteCardID(String cardID);
+void logAccess(String cardID);
 
 int door_timer = 5000;
 
@@ -66,13 +57,10 @@ void setup() {
   Serial.begin(115200);
   pinMode(MOSFET, OUTPUT);
   digitalWrite(MOSFET, LOW);
-  
-  // Initialize NVS
+
   preferences.begin("doorlock", false);
   initializeSPIFFS();
-  loadCacheFromFile();
 
-  // Check if WiFi is configured
   if (!preferences.isKey("ssid")) {
     setupAccessPoint();
   } else {
@@ -81,53 +69,31 @@ void setup() {
 
   Leds_Yellow();
   setupRDM6300();
-  
-  // Add your networks to the WiFiMulti object
-  wifiMulti.addAP("Your_SSID", "Your_Password");
-  wifiMulti.addAP("Your_SSID", "Your_Password");
-  wifiMulti.addAP("Your_SSID", "Your_Password");
-  
+
+  wifiMulti.addAP("Lab.systems", "createavity");
+  wifiMulti.addAP("Mullet_Bar-staff", "sexyhairstyle");
   setupWiFi();
-  
+
   Serial.println("\nReady");
 }
 
-void handleRoot() {
-  String html = "<html><body><h1>ESP32 Door Lock Configuration</h1>";
-  html += "<form method='post' action='/submit'>";
-  // Add form fields for SSID, password, etc.
-  html += "<input type='submit' value='Save'>";
-  html += "</form></body></html>";
-
-  server.send(200, "text/html", html);
-}
-
-
 void setupAccessPoint() {
-  // Set up the ESP32 as an Access Point
-  WiFi.softAP("ESP32-DoorLock", "password");
-
-  // Start the web server
-  server.on("/", HTTP_GET, handleRoot);
+  WiFi.softAP("ESP32-DoorLock", "createavity");
   server.begin();
 }
 
 void connectToWiFi() {
-  // Connect to the stored WiFi network
   String ssid = preferences.getString("ssid");
   String password = preferences.getString("password");
   WiFi.begin(ssid.c_str(), password.c_str());
-
-  // Wait for connection
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.println("Connecting to WiFi..");
   }
-
   Serial.println("Connected to the WiFi network");
 }
 
-void Leds_Blue() {;
+void Leds_Blue() {
   fill_solid(leds, NUM_LEDS, CRGB::Blue);
   FastLED.show();
 }
@@ -148,123 +114,56 @@ void Leds_Yellow() {
   FastLED.show();
 }
 
-void Leds_no_wifi_animation(){
-  //make the leds blink rapidly to indicate no wifi
-  for (int i = 0; i < 5; i++) {
-    fill_solid(leds, NUM_LEDS, CRGB::Red);
-    FastLED.show();
-    delay(100);
-    fill_solid(leds, NUM_LEDS, CRGB::Black);
-    FastLED.show();
-    delay(100);
-  }
-}
-
 void setupWiFi() {
-  // Replace the WiFi.begin() with wifiMulti.run()
   while (wifiMulti.run() != WL_CONNECTED) {
     delay(500);
     Serial.println("Connecting to WiFi..");
-    Leds_no_wifi_animation();
   }
- 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.println("Connecting to WiFi..");
-    Leds_no_wifi_animation();
-  }
-
   Serial.println("Connected to the WiFi network");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-  Serial.println(WiFi.RSSI());
-  pingGoogle();
 }
 
-void check_wifi(){
+void pingGoogle() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected");
-    setupWiFi();
-  }
-}
-
-void pingGoogle(){
-  if(WiFi.status() != WL_CONNECTED){
     Serial.println("WiFi not connected");
     return;
   }
   bool success = Ping.ping("www.google.com", 3);
-  if(!success){
+  if (!success) {
     Serial.println("Ping failed");
-    Leds_no_wifi_animation();
     return;
   }
-  Serial.println("Ping succesful. I am ready.");
-  Leds_Blue();
+  Serial.println("Ping successful. I am ready.");
 }
 
 void setupRDM6300() {
   rdm6300.begin(RDM6300_RX_PIN);
 }
 
-String getMemberID(String cardID) {
-    HTTPClient http; //init http client
-    DynamicJsonDocument doc(1024); //json document for parsing response
+bool checkAccess(String cardID) {
+    HTTPClient http;
+    String url = "https://lab.cafe/otello/admin/api/check_access/2247/" + cardID;
 
-    Serial.println("API Request for getMemberID:");
-    Serial.println("https://fabman.io/api/v1/members?keyType=em4102&keyToken=" + cardID + "&limit=50");
-    Serial.println("Authorization: " + String(BEARER_HEADER) + String(API_KEY));
+    Serial.print("API Request for checkAccess: ");
+    Serial.println(url);
 
-    String authHeader = String(BEARER_HEADER) + String(API_KEY); //create auth header
-    http.begin("https://fabman.io/api/v1/members?keyType=em4102&keyToken=" + cardID + "&limit=50");
-    http.addHeader("Authorization", authHeader.c_str());
+    http.begin(url);
+
     int httpResponseCode = http.GET();
-    
-    String payload = http.getString();
+    String response = http.getString();
+
     Serial.print("HTTP Response Code: ");
     Serial.println(httpResponseCode);
-    Serial.println("API Response for getMemberID:");
-    Serial.println(payload);
+    Serial.println("API Response:");
+    Serial.println(response);
 
-    if (httpResponseCode == 200 && payload != "[]" ) {
-        deserializeJson(doc, payload);
-        String memberID = doc[0]["id"].as<String>();
-        return memberID;
-    } else if (httpResponseCode == 409) {
-        // Handle optimistic locking conflict
-        // Fetch the latest version of the entity, merge changes, and retry
-    }
-    
-    http.end();
-    return "";
-}
-
-bool checkMemberAccess(String memberID) {
-    if (memberID == "") {
-        return false;
-    }
-    HTTPClient http;
-    DynamicJsonDocument doc(1024);
-
-    String authHeader = String(BEARER_HEADER) + String(API_KEY);
-    http.begin("https://fabman.io/api/v1/members/" + memberID + "/trainings");
-    http.addHeader("Authorization", authHeader.c_str());
-    int httpResponseCode = http.GET();
     if (httpResponseCode == 200) {
-        String payload = http.getString();
-
-        deserializeJson(doc, payload);
-        for (JsonObject training : doc.as<JsonArray>()) {
-            if (training["trainingCourse"] == 1031) {
-                return true;
-            }
-        }
-    } else if (httpResponseCode == 429) {
-        // Handle rate limiting
-        delay(2000); // Wait for 2 seconds before retrying
-        return checkMemberAccess(memberID); // Retry the request
+        DynamicJsonDocument doc(1024);
+        deserializeJson(doc, response);
+        return doc["response"].as<int>() == 1; // Check if "response" is 1
+    } else {
+        Serial.println("Failed to get access. Response code: " + String(httpResponseCode));
     }
-    
+
     http.end();
     return false;
 }
@@ -283,124 +182,167 @@ void initializeSPIFFS() {
   Serial.println("SPIFFS mounted successfully.");
 }
 
-void loadCacheFromFile() {
-  if (!SPIFFS.exists(CACHE_FILE)) {
-    Serial.println("No cache file found.");
-    return;
-  }
-
-  File file = SPIFFS.open(CACHE_FILE, "r");
+void saveCardID(String cardID) {
+  File file = SPIFFS.open("/cards.txt", FILE_APPEND);
   if (!file) {
-    Serial.println("Failed to open cache file for reading.");
+    Serial.println("Failed to open file for appending.");
     return;
   }
-
-  DynamicJsonDocument doc(2048);
-  DeserializationError error = deserializeJson(doc, file);
-  if (error) {
-    Serial.print("Failed to parse cache file: ");
-    Serial.println(error.c_str());
-    file.close();
-    return;
-  }
-
-  for (JsonPair kv : doc.as<JsonObject>()) {
-    String cardID = kv.key().c_str();
-    JsonObject entry = kv.value();
-    cardCache[cardID] = { entry["hasAccess"], entry["lastUsed"] };
-  }
-
+  time_t now = time(nullptr);
+  file.printf("%s,%ld\n", cardID.c_str(), now);
   file.close();
-  Serial.println("Cache loaded successfully from file.");
+  Serial.println("Card ID saved to SPIFFS: " + cardID);
 }
 
-void saveCacheToFile() {
-  DynamicJsonDocument doc(2048);
-
-  for (const auto& kv : cardCache) {
-    JsonObject entry = doc.createNestedObject(kv.first);
-    entry["hasAccess"] = kv.second.hasAccess;
-    entry["lastUsed"] = kv.second.lastUsed;
-  }
-
-  File file = SPIFFS.open(CACHE_FILE, "w");
+bool isCardIDStored(String cardID, time_t &timestamp) {
+  File file = SPIFFS.open("/cards.txt", FILE_READ);
   if (!file) {
-    Serial.println("Failed to open cache file for writing.");
-    return;
+    Serial.println("Failed to open file for reading.");
+    return false;
   }
 
-  if (serializeJson(doc, file) == 0) {
-    Serial.println("Failed to write cache data to file.");
-  } else {
-    Serial.println("Cache saved successfully to file.");
-  }
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    int delimiterIndex = line.indexOf(',');
+    if (delimiterIndex == -1) continue;
 
-  file.close();
-}
+    String storedCardID = line.substring(0, delimiterIndex);
+    timestamp = line.substring(delimiterIndex + 1).toInt();
 
-void cleanCache() {
-  time_t currentTime = time(nullptr);
-
-  for (auto it = cardCache.begin(); it != cardCache.end();) {
-    if (currentTime - it->second.lastUsed > SEVEN_DAYS) {
-      Serial.print("Removing stale card: ");
-      Serial.println(it->first);
-      it = cardCache.erase(it); // Remove from memory
-    } else {
-      ++it;
+    if (storedCardID == cardID) {
+      file.close();
+      return true;
     }
   }
+  file.close();
+  return false;
+}
 
-  saveCacheToFile(); // Save updated cache to file
+void updateCardTimestamp(String cardID) {
+  File file = SPIFFS.open("/cards.txt", FILE_READ);
+  if (!file) {
+    Serial.println("Failed to open file for reading.");
+    return;
+  }
+
+  String tempFileContent = "";
+  time_t now = time(nullptr);
+
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    int delimiterIndex = line.indexOf(',');
+    if (delimiterIndex == -1) continue;
+
+    String storedCardID = line.substring(0, delimiterIndex);
+    time_t timestamp = line.substring(delimiterIndex + 1).toInt();
+
+    if (storedCardID == cardID) {
+      tempFileContent += String(storedCardID) + "," + String(now) + "\n";
+    } else {
+      tempFileContent += line + "\n";
+    }
+  }
+  file.close();
+
+  file = SPIFFS.open("/cards.txt", FILE_WRITE);
+  if (!file) {
+    Serial.println("Failed to open file for writing.");
+    return;
+  }
+  file.print(tempFileContent);
+  file.close();
+  Serial.println("Timestamp updated for card ID: " + cardID);
+}
+
+void deleteCardID(String cardID) {
+  File file = SPIFFS.open("/cards.txt", FILE_READ);
+  if (!file) {
+    Serial.println("Failed to open file for reading.");
+    return;
+  }
+
+  String tempFileContent = "";
+
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    int delimiterIndex = line.indexOf(',');
+    if (delimiterIndex == -1) continue;
+
+    String storedCardID = line.substring(0, delimiterIndex);
+
+    if (storedCardID != cardID) {
+      tempFileContent += line + "\n";
+    }
+  }
+  file.close();
+
+  file = SPIFFS.open("/cards.txt", FILE_WRITE);
+  if (!file) {
+    Serial.println("Failed to open file for writing.");
+    return;
+  }
+  file.print(tempFileContent);
+  file.close();
+  Serial.println("Card ID deleted from SPIFFS: " + cardID);
+}
+
+void logAccess(String cardID) {
+  Serial.println("Logging access to backend...");
+  checkAccess(cardID); // Call the API to log the access
 }
 
 void CheckCard() {
   if (rdm6300.get_new_tag_id()) {
-    int cardCode = rdm6300.get_tag_id(); // Get the raw card code as a uint32_t
-    String cardID = "01" + String(cardCode, HEX); // Convert it to a string
+    int cardCode = rdm6300.get_tag_id();
+    String cardID = "01" + String(cardCode, HEX);
+    time_t timestamp;
 
     Serial.print("Card ID: ");
     Serial.println(cardID);
 
-    // Check if the cardID is already in the cache
-    if (cardCache.find(cardID) != cardCache.end()) {
-      // Use cached result
-      Serial.println("Card found in cache.");
-      cardCache[cardID].lastUsed = time(nullptr); // Update last used timestamp
-      saveCacheToFile();
-
-      if (cardCache[cardID].hasAccess) {
+    if (isCardIDStored(cardID, timestamp)) {
+      time_t now = time(nullptr);
+      if (now - timestamp <= SEVEN_DAYS) {
+        Serial.println("Card ID found in SPIFFS, access granted.");
         Leds_Green();
         openDoorLock();
+        logAccess(cardID); // Log access to backend after unlocking
+        return;
       } else {
-        Leds_Red();
-        delay(1000);
-      }
-    } else {
-      check_wifi();
-      Serial.println("Card not found in cache. Querying backend...");
-      String memberID = getMemberID(cardID);
-      bool hasAccess = false;
-      hasAccess = checkMemberAccess(memberID);
-      cardCache[cardID] = {hasAccess, time(nullptr)};
-      saveCacheToFile();
-
-      if (hasAccess) {
-        Leds_Green();
-        openDoorLock();
-      } else {
-        Leds_Red();
-        delay(1000);
+        Serial.println("Card ID expired in SPIFFS, verifying with backend...");
+        if (checkAccess(cardID)) {
+          Leds_Green();
+          openDoorLock();
+          updateCardTimestamp(cardID);
+          return;
+        } else {
+          Serial.println("Access denied. Card ID no longer valid. Deleting from SPIFFS.");
+          deleteCardID(cardID);
+          Leds_Red();
+          delay(1000);
+          return;
+        }
       }
     }
+
+    Serial.println("Card ID not found in SPIFFS, querying backend...");
+    if (checkAccess(cardID)) {
+      Leds_Green();
+      openDoorLock();
+      saveCardID(cardID);
+    } else {
+      Leds_Red();
+      delay(1000);
+    }
   }
-  cleanCache();
   delay(10);
 }
 
 void loop() {
   server.handleClient();
-  check_wifi();
   Leds_Blue();
   CheckCard();
 }
