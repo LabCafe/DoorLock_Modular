@@ -15,6 +15,7 @@
 #define MOSFET 15
 #define RGB_STRIP_PIN 5
 #define NUM_LEDS 3
+#define BUTTON_PIN 2
 
 // Globals
 WebServer server(80);
@@ -47,6 +48,7 @@ void Leds_Yellow();
 void setup() {
   Serial.begin(115200);
   pinMode(MOSFET, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
   digitalWrite(MOSFET, LOW);
 
   // Initialize FastLED
@@ -75,6 +77,7 @@ void setup() {
 }
 
 void setupAccessPoint() {
+  Leds_Yellow();
   WiFi.softAP("ESP32-Setup", "12345678");
   Serial.println("Access Point started. Connect to 'ESP32-Setup' and go to 192.168.4.1");
 
@@ -314,6 +317,7 @@ void CheckCard() {
           Serial.println("Access denied. Card removed from SPIFFS.");
           deleteCardID(cardID);  // Remove card from SPIFFS
           Leds_Red();  // Show red LED for access denied
+          delay(2000);
         }
       }
     } else {
@@ -326,6 +330,7 @@ void CheckCard() {
       } else {
         Serial.println("Access denied.");
         Leds_Red();  // Show red LED for access denied
+        delay(2000);
       }
     }
   } else {
@@ -333,6 +338,41 @@ void CheckCard() {
     Leds_Blue();  // Indicate waiting state
   }
 }
+
+bool checkButtonAccess() {
+  String device_id = preferences.getString("device_id");
+  HTTPClient http;
+  String url = "https://lab.cafe/otello/admin/api/door_button_open/" + device_id;
+
+  http.begin(url);
+  int httpResponseCode = http.GET();
+  if (httpResponseCode == 200) {
+    DynamicJsonDocument doc(1024);
+    deserializeJson(doc, http.getString());
+    http.end();
+    return doc["response"].as<int>() == 1;
+  }
+  http.end();
+  return false;
+}
+
+void handleButtonPress() {
+  if (digitalRead(BUTTON_PIN) == LOW) { // Check if the button is pressed
+    delay(50); // Debounce delay
+    if (digitalRead(BUTTON_PIN) == LOW) { // Confirm button press
+      Serial.println("Button pressed, calling API...");
+      if (checkButtonAccess()) {
+        Serial.println("API response: Open lock");
+        Leds_Green(); // Indicate successful action
+        openDoorLock(); // Open the lock
+      } else {
+        Serial.println("API response: Access denied");
+        Leds_Red(); // Indicate failure
+      }
+    }
+  }
+}
+
 
 
 void Leds_Blue() { 
@@ -358,7 +398,9 @@ void Leds_Yellow() {
 void loop() {
   if (isWiFiConfigured) {
     CheckCard();
+    handleButtonPress();
   } else {
     server.handleClient();
   }
 }
+
